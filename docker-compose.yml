@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # =========== Database ===========
   db:
@@ -21,25 +19,25 @@ services:
   web:
     build: .
     container_name: bible-rag-web
-    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4
+    # REMOVED: command: gunicorn... (now handled by entrypoint.sh)
     env_file:
       - .env
     volumes:
-      - .:/app  # Mount code for live editing (development)
+      - .:/app
       - static_files:/app/staticfiles
+      - huggingface_cache:/app/.cache/huggingface  # NEW: for model caching
     ports:
       - "8000:8000"
-
     depends_on:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/admin/login/"]  # IMPROVED
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # =========== LLM (Optional but Recommended) ===========
+  # =========== LLM (Optional) ===========
   ollama:
     image: ollama/ollama:latest
     container_name: bible-rag-ollama
@@ -47,16 +45,9 @@ services:
       - ollama_data:/root/.ollama
     ports:
       - "11434:11434"
-    # Note: Remove gpu support if you don't have NVIDIA GPU
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
 
 volumes:
   postgres_data:
   ollama_data:
   static_files:
+  huggingface_cache:  # NEW: for model persistence

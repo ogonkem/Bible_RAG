@@ -5,8 +5,10 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# Install system dependencies (added netcat-traditional for entrypoint.sh)
 RUN apt-get update && apt-get install -y \
     postgresql-client \
+    netcat-traditional \
     build-essential \
     libpq-dev \
     git \
@@ -20,8 +22,14 @@ RUN pip install --upgrade pip && \
 
 COPY . .
 
-RUN python manage.py collectstatic --noinput 2>/dev/null || true
+# Create directories (entrypoint.sh will populate staticfiles)
+RUN mkdir -p staticfiles .cache/huggingface
+
+# Copy entrypoint script
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
 
 EXPOSE 8000
 
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "4"]
+# Use entrypoint.sh instead of direct gunicorn command
+ENTRYPOINT ["./entrypoint.sh"]
