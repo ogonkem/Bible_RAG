@@ -5,7 +5,9 @@ Anthropic Claude, or OpenAI ChatGPT via a single environment variable.
 Usage:
     from api.llm_providers import get_llm_provider
     provider = get_llm_provider()
-    answer = provider.generate(prompt)
+    for token in provider.generate_stream(prompt):
+        ...
+    answer = provider.generate(prompt)  # non-streaming convenience wrapper
 
 Environment variables (set in .env):
     LLM_PROVIDER=ollama          # ollama | anthropic | openai
@@ -16,6 +18,7 @@ Environment variables (set in .env):
     OPENAI_MODEL=gpt-4o-mini
 """
 
+import json
 import os
 from abc import ABC, abstractmethod
 
@@ -24,9 +27,13 @@ import requests
 
 class LLMProvider(ABC):
     @abstractmethod
-    def generate(self, prompt: str) -> str:
-        """Return the full generated text for a given prompt."""
+    def generate_stream(self, prompt: str):
+        """Yield successive text chunks for a given prompt."""
         raise NotImplementedError
+
+    def generate(self, prompt: str) -> str:
+        """Return the full generated text by consuming the stream."""
+        return ''.join(self.generate_stream(prompt)).strip()
 
 
 class OllamaProvider(LLMProvider):
@@ -38,15 +45,39 @@ class OllamaProvider(LLMProvider):
     def __init__(self):
         self.model = os.getenv('OLLAMA_MODEL', 'mistral')
         self.base_url = os.getenv('OLLAMA_URL', 'http://ollama:11434')
+        # Ollama unloads an idle model after ~5 min by default; reloading
+        # multi-GB weights from disk on the next request measured ~96s on
+        # this CPU box before the first token streams. keep_alive keeps
+        # the model resident so that cold load only happens once.
+        self.keep_alive = os.getenv('OLLAMA_KEEP_ALIVE', '30m')
 
-    def generate(self, prompt: str) -> str:
+    def generate_stream(self, prompt: str):
+        # (connect_timeout, per-chunk read timeout) — each token only
+        # needs to arrive within read_timeout of the previous one, not
+        # within one global deadline. read_timeout must still cover a
+        # worst-case cold model load (see keep_alive above), hence 120s
+        # rather than a value tuned for steady-state token gaps.
         response = requests.post(
             f"{self.base_url}/api/generate",
-            json={"model": self.model, "prompt": prompt, "stream": False},
-            timeout=60,
+            json={
+                "model": self.model,
+                "prompt": prompt,
+                "stream": True,
+                "keep_alive": self.keep_alive,
+            },
+            stream=True,
+            timeout=(10, 120),
         )
         response.raise_for_status()
-        return response.json().get('response', '').strip()
+        for line in response.iter_lines():
+            if not line:
+                continue
+            chunk = json.loads(line)
+            text = chunk.get('response')
+            if text:
+                yield text
+            if chunk.get('done'):
+                break
 
 
 class AnthropicProvider(LLMProvider):
@@ -58,15 +89,16 @@ class AnthropicProvider(LLMProvider):
         if not self.api_key:
             raise ValueError("ANTHROPIC_API_KEY not set in environment")
 
-    def generate(self, prompt: str) -> str:
+    def generate_stream(self, prompt: str):
         import anthropic
         client = anthropic.Anthropic(api_key=self.api_key)
-        message = client.messages.create(
+        with client.messages.stream(
             model=self.model,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
-        )
-        return message.content[0].text.strip()
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
 
 
 class OpenAIProvider(LLMProvider):
@@ -78,14 +110,18 @@ class OpenAIProvider(LLMProvider):
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY not set in environment")
 
-    def generate(self, prompt: str) -> str:
+    def generate_stream(self, prompt: str):
         import openai
         client = openai.OpenAI(api_key=self.api_key)
-        completion = client.chat.completions.create(
+        stream = client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
+            stream=True,
         )
-        return completion.choices[0].message.content.strip()
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
 
 
 _PROVIDER_REGISTRY = {

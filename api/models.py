@@ -1,5 +1,5 @@
 from django.db import models
-from pgvector.django import VectorField
+from pgvector.django import VectorField, HnswIndex
 
 # Create your models here.
 class Book(models.Model):
@@ -47,6 +47,23 @@ class Chunk(models.Model):
     embedding = VectorField(dimensions=384)
     translation = models.CharField(max_length=3, default='KJV')
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # A given verse span + translation always produces the same chunk,
+        # so this doubles as the natural key -- lets chunk_and_embed rerun
+        # with ignore_conflicts instead of duplicating every chunk.
+        unique_together = ('start_verse', 'end_verse', 'translation')
+        indexes = [
+            # retrieve_chunks() orders by `embedding <=> query_vector`
+            # (cosine distance), so the index must use the matching opclass.
+            HnswIndex(
+                name='chunk_embedding_hnsw_idx',
+                fields=['embedding'],
+                m=16,
+                ef_construction=64,
+                opclasses=['vector_cosine_ops'],
+            ),
+        ]
 
     def __str__(self):
         return f"{self.book.name} {self.start_verse.chapter}:{self.start_verse.verse_num} - {self.end_verse.chapter}:{self.end_verse.verse_num}"
